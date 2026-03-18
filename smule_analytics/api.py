@@ -11,6 +11,7 @@
 #   - try/except (error handling)
 #   - return values
 #   - importing libraries
+#   - while loops with a break condition
 # =============================================================================
 
 import re        # Standard library for text pattern matching ("regular expressions")
@@ -93,26 +94,36 @@ def get_user_profile_from_page(username: str) -> dict:
 
 # ---------------------------------------------------------------------------
 # FUNCTION: get_performances
+#
+# Fetches one "page" (25 recordings) from the Smule "legacy" JSON endpoint.
+#
+# URL format:  /cacophonoussound/recordings/json?offset=0
+#              /cacophonoussound/recordings/json?offset=25
+#              /cacophonoussound/recordings/json?offset=50  ... and so on
+#
+# This endpoint genuinely paginates — each call with a new offset returns
+# a different batch of recordings, unlike the older endpoint we previously
+# used which returned the same 25 results regardless of the offset value.
 # ---------------------------------------------------------------------------
-def get_performances(username: str, next_offset: int = 0) -> dict | None:
+def get_performances(username: str, offset: int = 0) -> dict | None:
     """
-    Fetch one page of performances for a user.
-
-    The Smule API returns 25 performances at a time. Each response includes
-    a `next_offset` value that tells us where to start for the next page.
+    Fetch one page of performances (25 recordings) for a user.
 
     Args:
-        username:    Smule handle
-        next_offset: Where to start (0 = first page, 25 = second page, etc.)
+        username: Smule handle (e.g. "cacophonoussound")
+        offset:   Where to start — 0 = first 25, 25 = next 25, etc.
 
     Returns:
         A dict with "list" (performances) and "next_offset", or None on error.
     """
-    # This is the working Smule endpoint discovered by testing
-    url = f"{BASE_URL}/s/profile/performance/{username}"
+    # The "legacy" JSON endpoint: no authentication required, real pagination.
+    # We discovered this by studying open-source Smule analytics projects
+    # and verifying it returns unique data at each offset.
+    url = f"{BASE_URL}/{username}/recordings/json"
 
-    # Query parameters are added to the URL: ?next_offset=0
-    params = {"next_offset": next_offset}
+    # Query parameters become the URL query string: ?offset=0&limit=25
+    # requests handles the URL encoding for us automatically.
+    params = {"offset": offset}
 
     try:
         response = requests.get(url, headers=HEADERS, params=params, timeout=10)
@@ -120,7 +131,7 @@ def get_performances(username: str, next_offset: int = 0) -> dict | None:
         return response.json()
 
     except requests.exceptions.HTTPError as e:
-        print(f"[API] HTTP error fetching performances: {e}")
+        print(f"[API] HTTP error fetching performances at offset {offset}: {e}")
         return None
     except requests.exceptions.RequestException as e:
         # RequestException is the base class for all requests errors
@@ -130,60 +141,85 @@ def get_performances(username: str, next_offset: int = 0) -> dict | None:
 
 # ---------------------------------------------------------------------------
 # FUNCTION: get_all_performances
+#
+# Repeatedly calls get_performances() with increasing offsets until Smule
+# tells us there are no more recordings to fetch.
+#
+# KEY PYTHON CONCEPTS:
+#   - while loop  (keeps looping until a condition becomes False)
+#   - break       (exits the loop immediately)
+#   - list +=     (extends a list in-place by appending another list)
+#   - set         (stores unique values; lookups are O(1) — very fast)
 # ---------------------------------------------------------------------------
-def get_all_performances(username: str, max_pages: int = 10) -> list:
+def get_all_performances(username: str, max_pages: int = 100) -> list:
     """
-    Fetch performances, deduplicating by performance_key.
-
-    NOTE: Smule's public API currently caps this endpoint at ~25 unique
-    recordings per user (it returns the same set regardless of offset).
-    We detect this by tracking which performance_keys we've already seen
-    and stopping as soon as a page adds no new entries.
+    Fetch every available recording for a user, using real pagination.
 
     Args:
         username:   Smule handle
-        max_pages:  Safety limit — stop after this many pages
+        max_pages:  Safety ceiling — stop after this many pages (25 each)
+                    Default 100 = up to 2,500 recordings.
 
     Returns:
-        A deduplicated list of performance dictionaries.
+        A list of all performance dictionaries, oldest to newest or
+        however Smule returns them.
     """
-    all_performances = []  # Start with an empty list
-    # A Python "set" stores unique values; lookups are very fast (O(1))
-    seen_keys = set()
-    next_offset = 0
-    page = 0
+    all_performances = []  # Grows as we fetch each page
+    seen_keys        = set()  # Tracks performance_key values we've already added
+    offset           = 0      # Start at the very first recording
+    page             = 0      # Counter just for the console progress output
 
-    print(f"[API] Fetching performances for @{username}...")
+    print(f"[API] Fetching all recordings for @{username}...")
 
+    # A while loop keeps running until we decide to break out of it.
     while page < max_pages:
-        data = get_performances(username, next_offset)
+        data = get_performances(username, offset=offset)
 
-        if not data:
+        # If the request failed entirely, stop trying
+        if data is None:
+            print("[API] Request failed — stopping.")
             break
 
         performances = data.get("list", [])
+
+        # An empty list means we've gone past the last recording
         if not performances:
+            print(f"[API] Empty page at offset {offset} — all recordings fetched.")
             break
 
-        # Filter out performances we've already seen
+        # ---------------------------------------------------------------
+        # Deduplication safety net
+        # Even with proper pagination we guard against accidental repeats.
+        # We use a set() here because checking "key in set" is O(1)
+        # (constant time), whereas "key in list" is O(n) (gets slower as
+        # the list grows). This matters when we have thousands of items.
+        # ---------------------------------------------------------------
         new_perfs = []
         for p in performances:
+            # "performance_key" is the unique ID Smule uses for each recording
             key = p.get("performance_key") or p.get("key")
             if key and key not in seen_keys:
                 seen_keys.add(key)
                 new_perfs.append(p)
 
+        # If every item on this page is a duplicate, we've truly hit the end
         if not new_perfs:
-            # No new unique performances on this page — we've seen everything
-            print(f"[API]   No new performances on page {page + 1} — stopping.")
+            print(f"[API] All items on page {page + 1} were duplicates — stopping.")
             break
 
+        # += on a list appends every item from new_perfs to all_performances
         all_performances += new_perfs
-        page += 1
-        print(f"[API]   Page {page}: {len(new_perfs)} new performances (total: {len(all_performances)})")
+        page  += 1
+        offset = data.get("next_offset", offset + 25)
 
-        next_offset = data.get("next_offset")
-        if not next_offset:
+        print(f"[API]   Page {page:3d} (offset {offset - 25:4d}): "
+              f"+{len(new_perfs):2d} recordings  |  total so far: {len(all_performances)}")
+
+        # A next_offset of None or 0 (when we're not at the start) means done.
+        # We check "offset > 0" to avoid stopping on the very first page.
+        if not data.get("next_offset") and page > 0:
+            print("[API] No next_offset returned — all recordings fetched.")
             break
 
+    print(f"[API] Done. Total recordings fetched: {len(all_performances)}")
     return all_performances
