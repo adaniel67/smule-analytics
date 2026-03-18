@@ -28,7 +28,7 @@ from smule_analytics import api, analytics, display
 # CONFIG — change these to analyze a different account or fetch more pages
 # ---------------------------------------------------------------------------
 USERNAME  = "cacophonoussound"
-MAX_PAGES = 8   # Each page = 25 performances, so 8 pages = up to 200
+MAX_PAGES = 200   # Each page = 25 performances; 200 pages = up to 5,000 recordings
 
 
 def run():
